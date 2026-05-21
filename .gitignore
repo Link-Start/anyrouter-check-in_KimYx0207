@@ -14,11 +14,17 @@ __pycache__/
 # 工具缓存
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # 运行时数据（签到产生）
 data/
+balance_hash.txt
 
 # IDE
 .idea/
 .vscode/
 *.swp
+.DS_Store

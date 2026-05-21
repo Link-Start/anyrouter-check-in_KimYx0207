@@ -52,31 +52,25 @@ def parse_cookies(cookies_data):
 
 
 async def get_waf_cookies_with_playwright(account_name: str, login_url: str, required_cookies: list[str]):
-	"""使用 Playwright 获取 WAF cookies（使用新 headless 模式绕过检测）"""
+	"""使用 Playwright 获取 WAF cookies（隐私模式）"""
 	print(f'[处理中] {account_name}: 启动浏览器获取 WAF cookies...')
 
 	async with async_playwright() as p:
 		import tempfile
 
 		with tempfile.TemporaryDirectory() as temp_dir:
-			# 使用 Chrome 新 headless 模式（更难被 WAF 检测）
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
-				headless=True,  # 使用新 headless 模式，不弹出窗口
+				headless=False,
 				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 				viewport={'width': 1920, 'height': 1080},
 				args=[
 					'--disable-blink-features=AutomationControlled',
 					'--disable-dev-shm-usage',
+					'--disable-web-security',
+					'--disable-features=VizDisplayCompositor',
 					'--no-sandbox',
-					'--disable-infobars',
-					'--disable-background-timer-throttling',
-					'--disable-popup-blocking',
-					'--disable-backgrounding-occluded-windows',
-					'--disable-renderer-backgrounding',
-					'--window-size=1920,1080',
 				],
-				ignore_default_args=['--enable-automation'],
 			)
 
 			page = await context.new_page()
@@ -183,6 +177,10 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				return True
 			else:
 				error_msg = result.get('msg', result.get('message', '未知错误'))
+				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
+					print(f'[成功] {account_name}: 今日已签到')
+					return True
 				print(f'[失败] {account_name}: 签到失败 - {error_msg}')
 				return False
 		except json.JSONDecodeError:
