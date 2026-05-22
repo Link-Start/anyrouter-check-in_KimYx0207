@@ -1,5 +1,11 @@
 # 敏感配置
 .env
+.env.*
+*.env
+*.local
+secrets.*
+*.secret
+!.env.example
 
 # Claude Code 配置（保留项目指令，忽略敏感设置）
 .claude/*
