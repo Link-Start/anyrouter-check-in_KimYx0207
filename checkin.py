@@ -10,6 +10,7 @@ import asyncio
 import json
 import sys
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -121,21 +122,26 @@ def get_user_info(client, headers, user_info_url: str):
 	try:
 		response = client.get(user_info_url, headers=headers, timeout=30)
 
-		if response.status_code == 200:
-			data = response.json()
-			if data.get('success'):
-				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / 500000, 2)
-				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'display': f'当前余额: ${quota}, 已用: ${used_quota}',
-				}
+		if response.status_code == 200 and response.headers.get('content-type', '').startswith('application/json'):
+			return parse_user_info_payload(response.json(), response.status_code)
 		return {'success': False, 'error': f'获取用户信息失败: HTTP {response.status_code}'}
 	except Exception as e:
 		return {'success': False, 'error': f'获取用户信息失败: {str(e)[:50]}...'}
+
+
+def parse_user_info_payload(data: dict, status_code: int = 200):
+	"""解析用户信息响应。"""
+	if status_code == 200 and data.get('success'):
+		user_data = data.get('data', {})
+		quota = round(user_data.get('quota', 0) / 500000, 2)
+		used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
+		return {
+			'success': True,
+			'quota': quota,
+			'used_quota': used_quota,
+			'display': f'当前余额: ${quota}, 已用: ${used_quota}',
+		}
+	return {'success': False, 'error': f'获取用户信息失败: HTTP {status_code}'}
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -157,6 +163,151 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 	return {**waf_cookies, **user_cookies}
 
 
+async def browser_fetch_json(page, url: str, method: str, api_user_key: str, api_user: str):
+	"""在浏览器上下文里请求 API，保留 WAF JS 校验产生的浏览器状态。"""
+	return await page.evaluate(
+		"""async ({url, method, apiUserKey, apiUser}) => {
+			const response = await fetch(url, {
+				method,
+				credentials: 'include',
+				headers: {
+					'Accept': 'application/json, text/plain, */*',
+					'Content-Type': 'application/json',
+					'X-Requested-With': 'XMLHttpRequest',
+					[apiUserKey]: apiUser
+				}
+			});
+			return {
+				status: response.status,
+				contentType: response.headers.get('content-type') || '',
+				text: await response.text()
+			};
+		}""",
+		{
+			'url': url,
+			'method': method,
+			'apiUserKey': api_user_key,
+			'apiUser': api_user,
+		},
+	)
+
+
+def parse_json_response(response: dict):
+	"""解析浏览器 fetch 的 JSON 响应。"""
+	if not response.get('contentType', '').startswith('application/json'):
+		return None
+	try:
+		return json.loads(response.get('text') or '')
+	except json.JSONDecodeError:
+		return None
+
+
+async def check_in_with_browser(account: AccountConfig, account_name: str, provider_config):
+	"""在同一个浏览器上下文中完成 WAF 校验和 API 请求。"""
+	print(f'[处理中] {account_name}: 启动浏览器执行签到请求...')
+
+	async with async_playwright() as p:
+		import tempfile
+
+		with tempfile.TemporaryDirectory() as temp_dir:
+			context = await p.chromium.launch_persistent_context(
+				user_data_dir=temp_dir,
+				headless=True,
+				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+				viewport={'width': 1920, 'height': 1080},
+				args=[
+					'--disable-blink-features=AutomationControlled',
+					'--disable-dev-shm-usage',
+					'--no-sandbox',
+				],
+			)
+
+			try:
+				page = await context.new_page()
+				await page.goto(f'{provider_config.domain}{provider_config.login_path}', wait_until='networkidle')
+
+				domain = urlparse(provider_config.domain).hostname
+				user_cookies = parse_cookies(account.cookies)
+				await context.add_cookies([
+					{
+						'name': key,
+						'value': str(value),
+						'domain': domain,
+						'path': '/',
+						'httpOnly': False,
+						'secure': True,
+						'sameSite': 'Lax',
+					}
+					for key, value in user_cookies.items()
+				])
+
+				if provider_config.name == 'anyrouter':
+					await page.goto(f'{provider_config.domain}/console/token', wait_until='networkidle')
+
+				user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
+				before_response = await browser_fetch_json(
+					page, user_info_url, 'GET', provider_config.api_user_key, account.api_user
+				)
+				user_info_before = parse_user_info_payload(
+					parse_json_response(before_response) or {}, before_response['status']
+				)
+
+				if user_info_before and user_info_before.get('success'):
+					print(f'[签到前] {user_info_before["display"]}')
+				elif user_info_before:
+					print(f'[警告] {user_info_before.get("error", "未知错误")}')
+
+				if provider_config.needs_manual_check_in():
+					print(f'[网络] {account_name}: 在浏览器上下文执行签到请求')
+					sign_in_url = f'{provider_config.domain}{provider_config.sign_in_path}'
+					sign_in_response = await browser_fetch_json(
+						page, sign_in_url, 'POST', provider_config.api_user_key, account.api_user
+					)
+					print(f'[响应] {account_name}: 响应状态码 {sign_in_response["status"]}')
+					sign_in_result = parse_json_response(sign_in_response)
+					api_success = parse_check_in_result(sign_in_result, account_name) if sign_in_result else False
+				else:
+					print(f'[信息] {account_name}: 签到已自动完成（通过用户信息请求触发）')
+					api_success = True
+
+				after_response = await browser_fetch_json(
+					page, user_info_url, 'GET', provider_config.api_user_key, account.api_user
+				)
+				user_info_after = parse_user_info_payload(
+					parse_json_response(after_response) or {}, after_response['status']
+				)
+
+				if user_info_after and user_info_after.get('success'):
+					print(f'[签到后] {user_info_after["display"]}')
+
+				return api_success, user_info_before, user_info_after
+			except Exception as e:
+				print(f'[失败] {account_name}: 浏览器签到过程中发生错误: {e}')
+				return False, None, None
+			finally:
+				await context.close()
+
+
+def parse_check_in_result(result: dict | None, account_name: str) -> bool:
+	"""解析签到接口响应。"""
+	if not result:
+		print(f'[失败] {account_name}: 签到失败 - 响应格式无效')
+		return False
+
+	if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
+		print(f'[成功] {account_name}: 签到成功！')
+		return True
+
+	error_msg = result.get('msg', result.get('message', '未知错误'))
+	already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+	if any(keyword in str(error_msg).lower() for keyword in already_checked_keywords):
+		print(f'[成功] {account_name}: 今日已签到')
+		return True
+
+	print(f'[失败] {account_name}: 签到失败 - {error_msg}')
+	return False
+
+
 def execute_check_in(client, account_name: str, provider_config, headers: dict):
 	"""执行签到请求"""
 	print(f'[网络] {account_name}: 执行签到请求')
@@ -171,18 +322,7 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 	if response.status_code == 200:
 		try:
-			result = response.json()
-			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-				print(f'[成功] {account_name}: 签到成功！')
-				return True
-			else:
-				error_msg = result.get('msg', result.get('message', '未知错误'))
-				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
-				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
-					print(f'[成功] {account_name}: 今日已签到')
-					return True
-				print(f'[失败] {account_name}: 签到失败 - {error_msg}')
-				return False
+			return parse_check_in_result(response.json(), account_name)
 		except json.JSONDecodeError:
 			# 如果不是 JSON 响应，检查是否包含成功标识
 			if 'success' in response.text.lower():
@@ -258,6 +398,39 @@ async def check_in_account(
 			account_name=account_name,
 			status=SigninStatus.ERROR,
 			error='配置格式无效',
+		)
+
+	if provider_config.needs_waf_cookies():
+		api_success, user_info_before, user_info_after = await check_in_with_browser(
+			account, account_name, provider_config
+		)
+		balance_before = user_info_before.get('quota') if user_info_before and user_info_before.get('success') else last_balance
+		balance_after = user_info_after.get('quota') if user_info_after and user_info_after.get('success') else None
+
+		if balance_after is not None:
+			status, balance_diff = analyze_balance_change(balance_after, balance_before, last_signin_time)
+		else:
+			status = SigninStatus.SUCCESS if api_success else SigninStatus.FAILED
+			balance_diff = None
+
+		from utils.result import UserBalance
+		user_balance = None
+		if user_info_after and user_info_after.get('success'):
+			user_balance = UserBalance(
+				quota=user_info_after['quota'],
+				used_quota=user_info_after['used_quota']
+			)
+
+		return SigninResult(
+			account_key=account_key,
+			account_name=account_name,
+			status=status,
+			balance_before=balance_before or last_balance,
+			balance_after=balance_after,
+			balance_diff=balance_diff,
+			user_info=user_balance,
+			last_signin=last_signin_time,
+			new_record=SigninRecord(time=datetime.now(), balance=balance_after),
 		)
 
 	all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
