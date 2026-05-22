@@ -9,6 +9,27 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal
 
 
+def _strip_control_characters(value: str) -> str:
+	"""移除 GitHub Secrets 粘贴时可能混入的控制字符。"""
+	return ''.join(ch for ch in value if ord(ch) >= 32)
+
+
+def _loads_json_env(name: str, value: str):
+	"""解析 JSON 环境变量，兼容 Secret 中意外换行的情况。"""
+	try:
+		return json.loads(value)
+	except json.JSONDecodeError as original_error:
+		sanitized = _strip_control_characters(value)
+		if sanitized == value:
+			raise
+
+		try:
+			print(f'[WARNING] {name} contains control characters; retrying after removing them')
+			return json.loads(sanitized)
+		except json.JSONDecodeError:
+			raise original_error
+
+
 @dataclass
 class ProviderConfig:
 	"""Provider 配置"""
@@ -108,7 +129,7 @@ class AppConfig:
 		providers_str = os.getenv('PROVIDERS')
 		if providers_str:
 			try:
-				providers_data = json.loads(providers_str)
+				providers_data = _loads_json_env('PROVIDERS', providers_str)
 
 				if not isinstance(providers_data, dict):
 					print('[WARNING] PROVIDERS must be a JSON object, ignoring custom providers')
@@ -167,7 +188,7 @@ def load_accounts_config() -> list[AccountConfig] | None:
 		return None
 
 	try:
-		accounts_data = json.loads(accounts_str)
+		accounts_data = _loads_json_env('ANYROUTER_ACCOUNTS', accounts_str)
 
 		if not isinstance(accounts_data, list):
 			print('ERROR: Account configuration must use array format [{}]')
