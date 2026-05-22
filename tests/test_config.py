@@ -33,6 +33,14 @@ def test_load_accounts_config_removes_control_characters(monkeypatch):
     assert accounts[0].api_user == 'user1'
 
 
+def test_default_providers_include_agentrouter():
+    app_config = AppConfig.load_from_env()
+
+    assert 'anyrouter' in app_config.providers
+    assert 'agentrouter' in app_config.providers
+    assert app_config.providers['agentrouter'].sign_in_path is None
+
+
 def test_config():
     """测试配置是否正确"""
     print('=' * 60)
