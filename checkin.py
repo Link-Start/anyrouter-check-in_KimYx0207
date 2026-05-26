@@ -9,6 +9,7 @@
 import asyncio
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -35,6 +36,17 @@ from utils.result import (
 )
 
 load_dotenv()
+
+
+@dataclass(frozen=True)
+class CheckInAttempt:
+	"""签到接口调用结果。"""
+
+	success: bool
+	error: str | None = None
+
+	def __bool__(self) -> bool:
+		return self.success
 
 
 def parse_cookies(cookies_data):
@@ -202,6 +214,21 @@ def parse_json_response(response: dict):
 		return None
 
 
+def parse_browser_check_in_response(response: dict, account_name: str) -> CheckInAttempt:
+	"""解析浏览器上下文里的签到响应。"""
+	result = parse_json_response(response)
+	if result:
+		return parse_check_in_result(result, account_name)
+
+	status = response.get('status')
+	if status and status != 200:
+		print(f'[失败] {account_name}: 签到失败 - HTTP {status}')
+		return CheckInAttempt(False, f'HTTP {status}')
+
+	print(f'[失败] {account_name}: 签到失败 - 响应格式无效')
+	return CheckInAttempt(False, '响应格式无效')
+
+
 async def check_in_with_browser(account: AccountConfig, account_name: str, provider_config):
 	"""在同一个浏览器上下文中完成 WAF 校验和 API 请求。"""
 	print(f'[处理中] {account_name}: 启动浏览器执行签到请求...')
@@ -264,11 +291,10 @@ async def check_in_with_browser(account: AccountConfig, account_name: str, provi
 						page, sign_in_url, 'POST', provider_config.api_user_key, account.api_user
 					)
 					print(f'[响应] {account_name}: 响应状态码 {sign_in_response["status"]}')
-					sign_in_result = parse_json_response(sign_in_response)
-					api_success = parse_check_in_result(sign_in_result, account_name) if sign_in_result else False
+					api_attempt = parse_browser_check_in_response(sign_in_response, account_name)
 				else:
 					print(f'[信息] {account_name}: 签到已自动完成（通过用户信息请求触发）')
-					api_success = True
+					api_attempt = CheckInAttempt(True)
 
 				after_response = await browser_fetch_json(
 					page, user_info_url, 'GET', provider_config.api_user_key, account.api_user
@@ -280,32 +306,32 @@ async def check_in_with_browser(account: AccountConfig, account_name: str, provi
 				if user_info_after and user_info_after.get('success'):
 					print(f'[签到后] {user_info_after["display"]}')
 
-				return api_success, user_info_before, user_info_after
+				return api_attempt, user_info_before, user_info_after
 			except Exception as e:
 				print(f'[失败] {account_name}: 浏览器签到过程中发生错误: {e}')
-				return False, None, None
+				return CheckInAttempt(False, str(e)[:100]), None, None
 			finally:
 				await context.close()
 
 
-def parse_check_in_result(result: dict | None, account_name: str) -> bool:
+def parse_check_in_result(result: dict | None, account_name: str) -> CheckInAttempt:
 	"""解析签到接口响应。"""
 	if not result:
 		print(f'[失败] {account_name}: 签到失败 - 响应格式无效')
-		return False
+		return CheckInAttempt(False, '响应格式无效')
 
 	if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
 		print(f'[成功] {account_name}: 签到成功！')
-		return True
+		return CheckInAttempt(True)
 
 	error_msg = result.get('msg', result.get('message', '未知错误'))
 	already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
 	if any(keyword in str(error_msg).lower() for keyword in already_checked_keywords):
 		print(f'[成功] {account_name}: 今日已签到')
-		return True
+		return CheckInAttempt(True)
 
 	print(f'[失败] {account_name}: 签到失败 - {error_msg}')
-	return False
+	return CheckInAttempt(False, str(error_msg))
 
 
 def execute_check_in(client, account_name: str, provider_config, headers: dict):
@@ -327,13 +353,13 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 			# 如果不是 JSON 响应，检查是否包含成功标识
 			if 'success' in response.text.lower():
 				print(f'[成功] {account_name}: 签到成功！')
-				return True
+				return CheckInAttempt(True)
 			else:
 				print(f'[失败] {account_name}: 签到失败 - 响应格式无效')
-				return False
+				return CheckInAttempt(False, '响应格式无效')
 	else:
 		print(f'[失败] {account_name}: 签到失败 - HTTP {response.status_code}')
-		return False
+		return CheckInAttempt(False, f'HTTP {response.status_code}')
 
 
 async def check_in_account(
@@ -401,7 +427,7 @@ async def check_in_account(
 		)
 
 	if provider_config.needs_waf_cookies():
-		api_success, user_info_before, user_info_after = await check_in_with_browser(
+		api_attempt, user_info_before, user_info_after = await check_in_with_browser(
 			account, account_name, provider_config
 		)
 		balance_before = user_info_before.get('quota') if user_info_before and user_info_before.get('success') else last_balance
@@ -410,7 +436,7 @@ async def check_in_account(
 		if balance_after is not None:
 			status, balance_diff = analyze_balance_change(balance_after, balance_before, last_signin_time)
 		else:
-			status = SigninStatus.SUCCESS if api_success else SigninStatus.FAILED
+			status = SigninStatus.SUCCESS if api_attempt.success else SigninStatus.FAILED
 			balance_diff = None
 
 		from utils.result import UserBalance
@@ -429,6 +455,7 @@ async def check_in_account(
 			balance_after=balance_after,
 			balance_diff=balance_diff,
 			user_info=user_balance,
+			error=api_attempt.error if status == SigninStatus.FAILED else None,
 			last_signin=last_signin_time,
 			new_record=SigninRecord(time=datetime.now(), balance=balance_after),
 		)
@@ -474,10 +501,10 @@ async def check_in_account(
 
 		# 执行签到
 		if provider_config.needs_manual_check_in():
-			api_success = execute_check_in(client, account_name, provider_config, headers)
+			api_attempt = execute_check_in(client, account_name, provider_config, headers)
 		else:
 			print(f'[信息] {account_name}: 签到已自动完成（通过用户信息请求触发）')
-			api_success = True
+			api_attempt = CheckInAttempt(True)
 
 		# 签到后获取余额
 		user_info_after = get_user_info(client, headers, user_info_url)
@@ -501,12 +528,12 @@ async def check_in_account(
 					print(f'[信息] {account_name}: 余额无变化，今日已签到')
 		else:
 			# 无法获取余额，使用 API 返回结果判断
-			status = SigninStatus.SUCCESS if api_success else SigninStatus.FAILED
+			status = SigninStatus.SUCCESS if api_attempt.success else SigninStatus.FAILED
 			balance_diff = None
-			if api_success:
+			if api_attempt.success:
 				print(f'[成功] {account_name}: API 返回签到成功（无法验证余额）')
 			else:
-				print(f'[失败] {account_name}: 签到失败')
+				print(f'[失败] {account_name}: 签到失败 - {api_attempt.error or "未知错误"}')
 
 		# 构建用户信息
 		from utils.result import UserBalance
@@ -528,6 +555,7 @@ async def check_in_account(
 			balance_after=balance_after,
 			balance_diff=balance_diff,
 			user_info=user_balance,
+			error=api_attempt.error if status == SigninStatus.FAILED else None,
 			last_signin=last_signin_time,
 			new_record=new_record,
 		)
