@@ -49,6 +49,7 @@ class NotificationKit:
 		self.email_user = os.getenv('EMAIL_USER', '')
 		self.email_pass = os.getenv('EMAIL_PASS', '')
 		self.email_to = os.getenv('EMAIL_TO', '')
+		self.email_sender = os.getenv('EMAIL_SENDER', '')
 		self.smtp_server = os.getenv('CUSTOM_SMTP_SERVER', '')
 		self.pushplus_token = os.getenv('PUSHPLUS_TOKEN', '')
 		self.server_push_key = os.getenv('SERVERPUSHKEY', '')
@@ -59,6 +60,8 @@ class NotificationKit:
 		self.gotify_token = os.getenv('GOTIFY_TOKEN', '')
 		self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
 		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID', '')
+		self.bark_key = os.getenv('BARK_KEY', '')
+		self.bark_server = os.getenv('BARK_SERVER', 'https://api.day.app')
 
 		# Gotify 优先级
 		gotify_priority_env = os.getenv('GOTIFY_PRIORITY', str(GOTIFY_PRIORITY_DEFAULT))
@@ -84,7 +87,8 @@ class NotificationKit:
 
 		mime_subtype = 'plain' if msg_type == 'text' else 'html'
 		msg = MIMEText(content, mime_subtype, 'utf-8')
-		msg['From'] = f'公益站签到助手 <{self.email_user}>'
+		sender = self.email_sender if self.email_sender else self.email_user
+		msg['From'] = f'公益站签到助手 <{sender}>'
 		msg['To'] = self.email_to
 		msg['Subject'] = title
 
@@ -202,6 +206,26 @@ class NotificationKit:
 			response = client.post(url, json=data)
 			self._check_response(response, 'Telegram')
 
+	def send_bark(self, title: str, content: str) -> None:
+		"""发送 Bark 通知"""
+		self._load_config()
+
+		if not self.bark_key:
+			raise NotificationError('Bark Key 未配置')
+
+		url = f'{self.bark_server.rstrip("/")}/push'
+		data = {
+			'device_key': self.bark_key,
+			'title': title,
+			'body': content,
+			'icon': 'https://anyrouter.top/favicon.ico',
+			'group': 'AnyRouter',
+		}
+
+		with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as client:
+			response = client.post(url, json=data)
+			self._check_response(response, 'Bark')
+
 	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text') -> dict[str, bool]:
 		"""推送消息到所有已配置的渠道
 
@@ -226,6 +250,7 @@ class NotificationKit:
 			('企业微信', lambda: self.send_wecom(title, content)),
 			('Gotify', lambda: self.send_gotify(title, content)),
 			('Telegram', lambda: self.send_telegram(title, content)),
+			('Bark', lambda: self.send_bark(title, content)),
 		]
 
 		for name, func in notifications:

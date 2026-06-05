@@ -18,6 +18,29 @@ load_dotenv()
 from utils.config import AppConfig, load_accounts_config
 
 
+def test_load_accounts_config_removes_control_characters(monkeypatch):
+    """GitHub Secrets 粘贴换行后仍能解析账号 JSON。"""
+    monkeypatch.setenv(
+        'ANYROUTER_ACCOUNTS',
+        '[{"name":"Test","provider":"anyrouter","cookies":{"session":"abc\r\n123"},"api_user":"user\t1"}]',
+    )
+
+    accounts = load_accounts_config()
+
+    assert accounts is not None
+    assert len(accounts) == 1
+    assert accounts[0].cookies == {'session': 'abc123'}
+    assert accounts[0].api_user == 'user1'
+
+
+def test_default_providers_include_agentrouter():
+    app_config = AppConfig.load_from_env()
+
+    assert 'anyrouter' in app_config.providers
+    assert 'agentrouter' in app_config.providers
+    assert app_config.providers['agentrouter'].sign_in_path is None
+
+
 def test_config():
     """测试配置是否正确"""
     print('=' * 60)

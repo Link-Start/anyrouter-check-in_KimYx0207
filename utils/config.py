@@ -9,6 +9,27 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal
 
 
+def _strip_control_characters(value: str) -> str:
+	"""移除 GitHub Secrets 粘贴时可能混入的控制字符。"""
+	return ''.join(ch for ch in value if ord(ch) >= 32)
+
+
+def _loads_json_env(name: str, value: str):
+	"""解析 JSON 环境变量，兼容 Secret 中意外换行的情况。"""
+	try:
+		return json.loads(value)
+	except json.JSONDecodeError as original_error:
+		sanitized = _strip_control_characters(value)
+		if sanitized == value:
+			raise
+
+		try:
+			print(f'[WARNING] {name} contains control characters; retrying after removing them')
+			return json.loads(sanitized)
+		except json.JSONDecodeError:
+			raise original_error
+
+
 @dataclass
 class ProviderConfig:
 	"""Provider 配置"""
@@ -26,7 +47,7 @@ class ProviderConfig:
 		required_waf_cookies = set()
 		if self.waf_cookie_names and isinstance(self.waf_cookie_names, List):
 			for item in self.waf_cookie_names:
-				name = "" if not item or not isinstance(item, str) else item.strip()
+				name = '' if not item or not isinstance(item, str) else item.strip()
 				if not name:
 					print(f'[WARNING] Found invalid WAF cookie name: {item}')
 					continue
@@ -45,6 +66,7 @@ class ProviderConfig:
 		配置格式:
 		- 基础: {"domain": "https://example.com"}
 		- 完整: {"domain": "https://example.com", "login_path": "/login", "api_user_key": "x-api-user", "signin_method": "browser_waf", ...}
+		- 上游兼容: {"domain": "https://example.com", "bypass_method": "waf_cookies", ...}
 		"""
 		# 兼容 signin_method 字段（用户配置）
 		signin_method = data.get('signin_method')
@@ -68,7 +90,7 @@ class ProviderConfig:
 			user_info_path=data.get('user_info_path', '/api/user/self'),
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=bypass_method,
-			waf_cookie_names = data.get('waf_cookie_names'),
+			waf_cookie_names=data.get('waf_cookie_names'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -77,7 +99,7 @@ class ProviderConfig:
 
 	def needs_manual_check_in(self) -> bool:
 		"""判断是否需要手动调用签到接口"""
-		return self.bypass_method == 'waf_cookies'
+		return self.sign_in_path is not None
 
 
 @dataclass
@@ -100,14 +122,23 @@ class AppConfig:
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
 			),
-			# agentrouter 已从内置配置移除（功能仍可通过 PROVIDERS 环境变量自定义）
+			'agentrouter': ProviderConfig(
+				name='agentrouter',
+				domain='https://agentrouter.org',
+				login_path='/login',
+				sign_in_path=None,
+				user_info_path='/api/user/self',
+				api_user_key='new-api-user',
+				bypass_method='waf_cookies',
+				waf_cookie_names=['acw_tc'],
+			),
 		}
 
 		# 尝试从环境变量加载自定义 providers
 		providers_str = os.getenv('PROVIDERS')
 		if providers_str:
 			try:
-				providers_data = json.loads(providers_str)
+				providers_data = _loads_json_env('PROVIDERS', providers_str)
 
 				if not isinstance(providers_data, dict):
 					print('[WARNING] PROVIDERS must be a JSON object, ignoring custom providers')
@@ -166,7 +197,7 @@ def load_accounts_config() -> list[AccountConfig] | None:
 		return None
 
 	try:
-		accounts_data = json.loads(accounts_str)
+		accounts_data = _loads_json_env('ANYROUTER_ACCOUNTS', accounts_str)
 
 		if not isinstance(accounts_data, list):
 			print('ERROR: Account configuration must use array format [{}]')

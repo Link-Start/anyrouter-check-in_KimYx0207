@@ -1,5 +1,11 @@
 # 敏感配置
 .env
+.env.*
+*.env
+*.local
+secrets.*
+*.secret
+!.env.example
 
 # Claude Code 配置（保留项目指令，忽略敏感设置）
 .claude/*
@@ -14,11 +20,17 @@ __pycache__/
 # 工具缓存
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # 运行时数据（签到产生）
 data/
+balance_hash.txt
 
 # IDE
 .idea/
 .vscode/
 *.swp
+.DS_Store
